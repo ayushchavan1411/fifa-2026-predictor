@@ -1,0 +1,64 @@
+image: python:3.12-slim
+
+stages:
+  - lint
+  - format
+  - typecheck
+  - deadcode
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+before_script:
+  - apt-get update && apt-get install -y git curl
+  - python -m venv venv
+  - source venv/bin/activate
+  - pip install --upgrade pip
+  - pip install black flake8 mypy vulture pytest pytest-cov
+
+lint:
+  stage: lint
+  script:
+    - source venv/bin/activate
+    - flake8 --max-line-length=120 --extend-ignore=E203 app.py fifa_agent.py historical_data.py translations.py
+  tags:
+    - local
+
+format:
+  stage: format
+  script:
+    - source venv/bin/activate
+    - black --check app.py fifa_agent.py historical_data.py translations.py
+  tags:
+    - local
+
+typecheck:
+  stage: typecheck
+  script:
+    - source venv/bin/activate
+    - mypy app.py fifa_agent.py historical_data.py translations.py --ignore-missing-imports
+  tags:
+    - local
+
+deadcode:
+  stage: deadcode
+  script:
+    - source venv/bin/activate
+    - vulture app.py fifa_agent.py historical_data.py translations.py --min-confidence=80 --exclude=venv,data
+  tags:
+    - local
+
+test:
+  stage: test
+  script:
+    - source venv/bin/activate
+    - pip install -r requirements.txt
+    - pytest tests/ --cov=. --cov-report=term
+  tags:
+    - local

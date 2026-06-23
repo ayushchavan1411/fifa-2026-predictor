@@ -1,0 +1,472 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import requests
+import json
+import time
+import asyncio
+from datetime import datetime
+from tmkt import TMKT
+from translations import translate
+
+# ---------- LANGUAGE SELECTION ----------
+if 'lang' not in st.session_state:
+    st.session_state.lang = 'en'
+
+lang_options = {
+    "English": "en",
+    "हिन्दी (Hindi)": "hi",
+    "తెలుగు (Telugu)": "te"
+}
+lang_display = st.sidebar.selectbox(
+    "भाषा / Language",
+    list(lang_options.keys()),
+    index=list(lang_options.values()).index(st.session_state.lang)
+)
+new_lang = lang_options[lang_display]
+if new_lang != st.session_state.lang:
+    st.session_state.lang = new_lang
+    st.rerun()
+
+def _(text):
+    return translate(text, st.session_state.lang)
+
+# ---------- PAGE CONFIG ----------
+st.set_page_config(page_title=_("🏆 FIFA World Cup 2026 Predictor"), page_icon="⚽", layout="wide")
+
+# ---------- LOAD LOCAL DATA ----------
+@st.cache_data
+def load_worldcup_data():
+    """Load World Cup 2026 data from local JSON file."""
+    try:
+        with open('data/worldcup.json/2026/worldcup.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error("World Cup data file not found. Please ensure data/worldcup.json/2026/worldcup.json exists.")
+        return None
+
+@st.cache_data
+def load_player_profiles():
+    """Load player profiles from CSV."""
+    try:
+        df = pd.read_csv('data/player_data/datalake/transfermarkt/player_profiles/player_profiles.csv')
+        return df
+    except FileNotFoundError:
+        st.warning("Player profiles data not found. Player search will use mock data.")
+        return pd.DataFrame()
+
+# Load data once
+WORLDCUP_DATA = load_worldcup_data()
+PLAYER_DF = load_player_profiles()
+
+# Extract groups and matches from the loaded data
+def get_groups_from_data():
+    """Return group mappings from the worldcup data."""
+    if WORLDCUP_DATA is None:
+        return {}
+    groups = {}
+    # The structure may vary; parse based on observed keys
+    # In the openfootball format, groups are under 'groups' key
+    for group in WORLDCUP_DATA.get('groups', []):
+        group_name = group.get('group', 'Unknown')
+        teams = group.get('teams', [])
+        groups[group_name] = teams
+    return groups
+
+def get_matches_from_data():
+    """Return list of matches from the worldcup data."""
+    if WORLDCUP_DATA is None:
+        return []
+    matches = WORLDCUP_DATA.get('matches', [])
+    # Each match should have home_team, away_team, group, status, home_score, away_score, date
+    return matches
+
+# Cache these to avoid recomputation
+@st.cache_data
+def get_cached_groups():
+    return get_groups_from_data()
+
+@st.cache_data
+def get_cached_matches():
+    return get_matches_from_data()
+
+# ---------- AI CONFIGURATION ----------
+st.sidebar.title(_("🤖 AI Settings"))
+ai_provider = st.sidebar.selectbox(_("AI Provider"), ["None", "Ollama (Local)", "OpenAI (BYOK)"])
+
+ollama_endpoint = None
+ollama_model = None
+openai_client = None
+
+if ai_provider == "Ollama (Local)":
+    ollama_endpoint = st.sidebar.text_input(_("Ollama Endpoint"), "http://127.0.0.1:11434")
+    ollama_model = st.sidebar.text_input(_("Model Name"), "tinyllama")
+    if st.sidebar.button(_("Test Ollama Connection")):
+        try:
+            r = requests.post(f"{ollama_endpoint}/api/generate", 
+                              json={"model": ollama_model, "prompt": "Hi"}, timeout=10)
+            if r.status_code == 200:
+                st.sidebar.success(_("✅ Ollama reachable!"))
+            else:
+                st.sidebar.error(_("❌ Connection failed"))
+        except requests.exceptions.Timeout:
+            st.sidebar.error(_("❌ Ollama is slow – try again or restart Ollama"))
+        except Exception as e:
+            st.sidebar.error(_("❌ Cannot reach Ollama: ") + str(e))
+
+elif ai_provider == "OpenAI (BYOK)":
+    openai_api_key = st.sidebar.text_input(_("OpenAI API Key"), type="password")
+    if openai_api_key:
+        try:
+            from openai import OpenAI
+            openai_client = OpenAI(api_key=openai_api_key)
+            st.sidebar.success(_("✅ API key accepted"))
+        except ImportError:
+            st.sidebar.error(_("Please install openai: pip install openai"))
+        except Exception as e:
+            st.sidebar.error(f"Error: {e}")
+
+# ---------- AI HELPER ----------
+def call_ai(prompt, context=""):
+    full_prompt = f"Context: {context}\n\nQuestion: {prompt}\n\nAnswer concisely."
+    if ai_provider == "Ollama (Local)" and ollama_endpoint and ollama_model:
+        try:
+            payload = {"model": ollama_model, "prompt": full_prompt, "stream": False}
+            r = requests.post(f"{ollama_endpoint}/api/generate", json=payload, timeout=30)
+            if r.status_code == 200:
+                return r.json().get("response", _("No response"))
+            else:
+                return f"Ollama error: {r.status_code}"
+        except Exception as e:
+            return f"Error: {e}"
+    elif ai_provider == "OpenAI (BYOK)" and openai_client:
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": _("You are a football expert assistant.")},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=300
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            return f"OpenAI error: {e}"
+    else:
+        return _("AI not configured.")
+
+# ---------- WIN PERCENTAGE HELPER (for team analysis) ----------
+def get_team_win_percentage(team_name):
+    football_pct = {
+        "manchester city": 0.74, "arsenal": 0.68, "liverpool": 0.63,
+        "real madrid": 0.71, "barcelona": 0.66, "bayern munich": 0.72,
+        "borussia dortmund": 0.58, "psg": 0.70, "chelsea": 0.55,
+        "manchester united": 0.53, "tottenham": 0.59, "brazil": 0.65,
+        "germany": 0.60, "argentina": 0.63, "france": 0.62,
+        "england": 0.58, "spain": 0.57, "netherlands": 0.61,
+        "portugal": 0.56, "belgium": 0.55, "croatia": 0.52,
+        "mexico": 0.48, "usa": 0.50, "senegal": 0.45,
+        "japan": 0.44, "south korea": 0.43, "australia": 0.40,
+    }
+    for key, pct in football_pct.items():
+        if key in team_name.lower():
+            return f"{pct*100:.0f}%"
+    return _("~50%")
+
+# ---------- FOOTBALL: 2026 WORLD CUP (from local data) ----------
+def get_worldcup_matches():
+    matches = get_cached_matches()
+    match_list = []
+    for m in matches:
+        home = m.get('home_team', 'TBD')
+        away = m.get('away_team', 'TBD')
+        group = m.get('group', 'Unknown')
+        status = m.get('status', 'upcoming')
+        home_score = m.get('home_score')
+        away_score = m.get('away_score')
+        date = m.get('date', '')
+        if status == 'finished':
+            status_text = _("✅ FINISHED")
+            score = f"{home_score}-{away_score}"
+            time_text = _("Final")
+        elif status == 'live':
+            status_text = _("🟢 LIVE")
+            score = f"{home_score}-{away_score}"
+            time_text = _("In Progress")
+        else:
+            status_text = _("📋 UPCOMING")
+            score = "-"
+            time_text = date
+        match_list.append({
+            _("Match"): f"{home} vs {away}",
+            _("Status"): status_text,
+            _("Score"): score,
+            _("Time"): time_text,
+            _("Stage"): _(f"Group {group}")
+        })
+    return match_list
+
+def get_worldcup_standings():
+    matches = get_cached_matches()
+    groups = get_cached_groups()
+    standings = {}
+    for group_name, teams in groups.items():
+        for team in teams:
+            standings[(group_name, team)] = {"played":0, "won":0, "drawn":0, "lost":0, "gf":0, "ga":0, "pts":0}
+    for m in matches:
+        if m.get('status') == 'finished':
+            group = m.get('group', 'Unknown')
+            home = m.get('home_team')
+            away = m.get('away_team')
+            hg = m.get('home_score', 0)
+            ag = m.get('away_score', 0)
+            if (group, home) in standings:
+                standings[(group, home)]["played"] += 1
+                standings[(group, home)]["gf"] += hg
+                standings[(group, home)]["ga"] += ag
+                standings[(group, away)]["played"] += 1
+                standings[(group, away)]["gf"] += ag
+                standings[(group, away)]["ga"] += hg
+                if hg > ag:
+                    standings[(group, home)]["won"] += 1
+                    standings[(group, home)]["pts"] += 3
+                    standings[(group, away)]["lost"] += 1
+                elif hg < ag:
+                    standings[(group, away)]["won"] += 1
+                    standings[(group, away)]["pts"] += 3
+                    standings[(group, home)]["lost"] += 1
+                else:
+                    standings[(group, home)]["drawn"] += 1
+                    standings[(group, away)]["drawn"] += 1
+                    standings[(group, home)]["pts"] += 1
+                    standings[(group, away)]["pts"] += 1
+    rows = []
+    for (group, team), data in standings.items():
+        rows.append({
+            "Group": group,
+            "Team": team,
+            "Played": data["played"],
+            "Won": data["won"],
+            "Drawn": data["drawn"],
+            "Lost": data["lost"],
+            "GF": data["gf"],
+            "GA": data["ga"],
+            "Points": data["pts"]
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df['GD'] = df['GF'] - df['GA']
+        df = df.sort_values(['Group','Points','GD','GF'], ascending=[True,False,False,False])
+        return df.drop(columns=['GD'])
+    return df
+
+def get_football_standings():
+    # Premier League standings (mock, could be extended with real data)
+    teams = [_("Manchester City"), _("Arsenal"), _("Liverpool"), _("Aston Villa"), _("Tottenham")]
+    return pd.DataFrame({
+        _("Team"): teams,
+        _("Played"): [38,38,38,38,38],
+        _("Won"): [28,26,24,20,19],
+        _("Drawn"): [7,8,8,7,6],
+        _("Lost"): [3,4,6,11,13],
+        _("Points"): [91,86,80,67,63]
+    })
+
+def search_football_player(query):
+    if not query:
+        return None
+    # First try to search in the local CSV
+    if not PLAYER_DF.empty:
+        # Filter by name (assuming a column like 'name' or 'player_name')
+        name_col = None
+        # Try common column names
+        for col in ['name', 'player_name', 'full_name', 'Name']:
+            if col in PLAYER_DF.columns:
+                name_col = col
+                break
+        if name_col:
+            matches = PLAYER_DF[PLAYER_DF[name_col].str.contains(query, case=False, na=False)]
+            if not matches.empty:
+                row = matches.iloc[0]
+                return {
+                    "name": row.get(name_col, query),
+                    "goals": row.get('goals', 0),
+                    "assists": row.get('assists', 0),
+                    "matches": row.get('appearances', 0),
+                    "team": row.get('current_club', _('Unknown')),
+                    "market_value": row.get('market_value', 'N/A')
+                }
+    # Fallback to Transfermarkt API (if available) or mock
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        async def fetch():
+            async with TMKT() as tmkt:
+                results = await tmkt.player_search(query)
+                if not results:
+                    return None
+                pid = results[0]['id']
+                profile = await tmkt.get_player(pid)
+                stats = await tmkt.get_player_stats(pid)
+                if profile:
+                    market_val = profile.get('market_value', 'N/A')
+                    if stats and len(stats) > 0:
+                        latest = stats[-1]
+                        return {
+                            "name": profile.get('name', query.title()),
+                            "goals": latest.get('goals', 0),
+                            "assists": latest.get('assists', 0),
+                            "matches": latest.get('appearances', 0),
+                            "team": profile.get('current_club_name', _('Unknown')),
+                            "market_value": market_val
+                        }
+                    else:
+                        return {
+                            "name": profile.get('name', query.title()),
+                            "goals": 0, "assists": 0, "matches": 0,
+                            "team": profile.get('current_club_name', _('Unknown')),
+                            "market_value": market_val
+                        }
+            return None
+        return loop.run_until_complete(fetch())
+    except:
+        # Final mock fallback
+        mock = {
+            "neymar": {"name":"Neymar","goals":18,"assists":12,"matches":22,"team":"Al-Hilal","market_value":"€45m"},
+            "messi": {"name":"Messi","goals":22,"assists":15,"matches":28,"team":"Inter Miami","market_value":"€25m"},
+        }
+        for key, val in mock.items():
+            if key in query.lower():
+                return val
+        return None
+
+def get_football_live_scores():
+    # For league live scores (mock – can be replaced with real API)
+    return [
+        {"match":"Manchester City vs Arsenal","status":_("🔴 LIVE"),"score":"2-1","time":_("2nd Half - 65'"),"competition":"Premier League"},
+        {"match":"Real Madrid vs Barcelona","status":_("✅ FINISHED"),"score":"3-2","time":_("Final"),"competition":"La Liga"},
+    ]
+
+# ---------- MAIN APP ----------
+st.title(_("🏆 FIFA World Cup 2026 Predictor"))
+st.caption(_("Live scores, standings, and AI predictions for the World Cup | AI: {}").format(ai_provider) + f" | {datetime.now().strftime('%H:%M:%S')}")
+
+auto_refresh = st.sidebar.checkbox(_("Auto-refresh live scores (every 30 sec)"), value=False)
+if auto_refresh:
+    st.sidebar.info(_("Auto-refresh enabled"))
+    time.sleep(30)
+    st.rerun()
+
+# Sport is fixed to Football now
+mode = st.sidebar.radio(_("Mode"), [
+    _("World Cup 2026"),
+    _("Live Scores (Leagues)"),
+    _("League Standings"),
+    _("Player Stats"),
+    _("AI Insights & Chat")
+])
+
+if mode == _("World Cup 2026"):
+    st.subheader(_("🏆 FIFA World Cup 2026"))
+    tab1, tab2 = st.tabs([_("📺 Matches"), _("📊 Group Standings")])
+    with tab1:
+        matches = get_worldcup_matches()
+        if matches:
+            st.dataframe(pd.DataFrame(matches), use_container_width=True)
+            if st.button(_("🤖 AI World Cup Analysis")):
+                ctx = f"{_('World Cup matches')}: {pd.DataFrame(matches).to_string()}"
+                analysis = call_ai(_("Analyze which match is most exciting and predict winners."), ctx)
+                st.info(analysis)
+        else:
+            st.info(_("No match data."))
+    with tab2:
+        df_stand = get_worldcup_standings()
+        if not df_stand.empty:
+            for grp in sorted(df_stand['Group'].unique()):
+                st.markdown(f"### {_('Group')} {grp}")
+                group_df = df_stand[df_stand['Group'] == grp].rename(columns={
+                    "Group": _("Group"),
+                    "Team": _("Team"),
+                    "Played": _("Played"),
+                    "Won": _("Won"),
+                    "Drawn": _("Drawn"),
+                    "Lost": _("Lost"),
+                    "GF": _("GF"),
+                    "GA": _("GA"),
+                    "Points": _("Points")
+                })
+                st.dataframe(group_df, use_container_width=True)
+            if st.button(_("🤖 AI Group Analysis")):
+                analysis = call_ai(_("Which teams are likely to advance to knockout stage?"), f"{_('Standings')}:\n{df_stand.to_string()}")
+                st.info(analysis)
+        else:
+            st.info(_("Standings not available."))
+    if st.button(_("🔄 Refresh World Cup")):
+        st.cache_data.clear()
+        st.rerun()
+
+elif mode == _("Live Scores (Leagues)"):
+    st.subheader(_("⚽ Live Football Scores (Leagues)"))
+    scores = get_football_live_scores()
+    if scores:
+        df = pd.DataFrame(scores)
+        st.dataframe(df, use_container_width=True)
+        if st.button(_("🤖 AI Analysis with Win %")):
+            ctx = _("Live football scores with win %:\n")
+            for _, row in df.iterrows():
+                teams = row['match'].split(' vs ')
+                if len(teams) == 2:
+                    wp1 = get_team_win_percentage(teams[0])
+                    wp2 = get_team_win_percentage(teams[1])
+                    ctx += f"{teams[0]} ({wp1}) vs {teams[1]} ({wp2}) | Score: {row['score']}\n"
+            analysis = call_ai(_("Analyze these matches."), ctx)
+            st.info(analysis)
+        if st.button(_("🔄 Refresh")):
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.info(_("No live league matches."))
+
+elif mode == _("League Standings"):
+    st.subheader(_("🏆 Premier League Standings"))
+    df = get_football_standings()
+    st.dataframe(df, use_container_width=True)
+    fig = px.bar(df, x=_("Team"), y=_("Points"), title=_("Points Table"), color=_("Points"), text=_("Points"))
+    fig.update_traces(textposition="outside")
+    st.plotly_chart(fig)
+    if st.button(_("🤖 AI League Analysis")):
+        analysis = call_ai(_("Who will win the league and why?"), f"{_('Standings')}:\n{df.to_string()}")
+        st.info(analysis)
+
+elif mode == _("Player Stats"):
+    st.subheader(_("⚽ Football Player Stats"))
+    st.info("Search for any player – uses local player profiles from Transfermarkt dataset.")
+    name = st.text_input(_("Player name (Messi, Ronaldo, Neymar...)"))
+    if st.button(_("Search")):
+        with st.spinner(_("Fetching real data...")):
+            stats = search_football_player(name)
+            if stats:
+                col1, col2, col3 = st.columns(3)
+                col1.metric(_("Goals"), stats['goals'])
+                col2.metric(_("Assists"), stats['assists'])
+                col3.metric(_("Matches"), stats['matches'])
+                st.metric(_("Team"), stats['team'])
+                if stats.get('market_value'):
+                    st.metric(_("Market Value"), stats['market_value'])
+                if st.button(_("🧠 AI Analysis")):
+                    ctx = f"{stats['name']}: {stats['goals']} {_('goals')}, {stats['assists']} {_('assists')} in {stats['matches']} {_('matches')}."
+                    analysis = call_ai(_("Evaluate this player."), ctx)
+                    st.info(analysis)
+            else:
+                st.error(_("Player not found."))
+
+else:  # AI Insights & Chat
+    st.subheader(_("💬 Football Chat"))
+    q = st.text_area(_("Ask about football (World Cup, leagues...)"))
+    if st.button(_("Ask AI")) and q:
+        st.info(call_ai(q, _("Football knowledge.")))
+
+# ---------- FOOTER ----------
+st.divider()
+st.caption(_("Data: openfootball/worldcup.json, salimt/football-datasets. AI powered by Ollama/OpenAI."))
