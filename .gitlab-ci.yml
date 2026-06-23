@@ -95,3 +95,13 @@ changelog:
   tags:
     - local
   allow_failure: true
+
+dependency_audit:
+  stage: security
+  script:
+    - source venv/bin/activate
+    - pip install pip-audit
+    - pip-audit || true
+  tags:
+    - local
+  allow_failure: true
