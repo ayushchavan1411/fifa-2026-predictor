@@ -50,3 +50,8 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [push]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

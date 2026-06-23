@@ -86,3 +86,12 @@ coverage:
       - htmlcov/
   tags:
     - local
+
+changelog:
+  stage: coverage
+  script:
+    - pip install git-cliff || true
+    - git-cliff --output CHANGELOG.md || true
+  tags:
+    - local
+  allow_failure: true
