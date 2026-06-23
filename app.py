@@ -748,7 +748,7 @@ elif mode == _("Match Predictor"):
             if st.button(_("Calculate Win Probability")):
                 with st.spinner(_("Analyzing data...")):
                     result = calculate_win_probability(
-                        team1, team2, include_details=True
+                        team1, team2
                     )
                     st.session_state["predict_result"] = result
 
