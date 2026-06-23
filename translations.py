@@ -256,8 +256,9 @@ TRANSLATIONS = {
         "Barcelona": "బార్సిలోనా",
         "Thunderstorm w...": "తుఫాను...",
         "In effect": "ప్రభావంలో",
-    }
+    },
 }
+
 
 def translate(text, lang_code):
     if lang_code == "en" or not text or not isinstance(text, str):

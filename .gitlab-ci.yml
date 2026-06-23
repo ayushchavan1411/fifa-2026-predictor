@@ -3,9 +3,11 @@ image: python:3.12-slim
 stages:
   - lint
   - format
-  - typecheck
+  - type_check
   - deadcode
+  - security
   - test
+  - coverage
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
@@ -20,13 +22,14 @@ before_script:
   - python -m venv venv
   - source venv/bin/activate
   - pip install --upgrade pip
-  - pip install black flake8 mypy vulture pytest pytest-cov
+  - pip install ruff black flake8 mypy vulture pytest pytest-cov bandit pyupgrade
 
 lint:
   stage: lint
   script:
     - source venv/bin/activate
-    - flake8 --max-line-length=1000 --extend-ignore=E203 app.py fifa_agent.py historical_data.py translations.py
+    - ruff check app.py fifa_agent.py historical_data.py translations.py
+    - flake8 --max-line-length=120 --extend-ignore=E203 app.py fifa_agent.py historical_data.py translations.py
   tags:
     - local
 
@@ -38,8 +41,8 @@ format:
   tags:
     - local
 
-typecheck:
-  stage: typecheck
+type_check:
+  stage: type_check
   script:
     - source venv/bin/activate
     - mypy app.py fifa_agent.py historical_data.py translations.py --ignore-missing-imports
@@ -50,9 +53,18 @@ deadcode:
   stage: deadcode
   script:
     - source venv/bin/activate
-    - vulture app.py fifa_agent.py historical_data.py translations.py --min-confidence=80 --exclude=venv,data
+    - vulture app.py fifa_agent.py historical_data.py translations.py --min-confidence=80
   tags:
     - local
+
+security:
+  stage: security
+  script:
+    - source venv/bin/activate
+    - bandit -r app.py fifa_agent.py historical_data.py translations.py -ll -iii
+  tags:
+    - local
+  allow_failure: true
 
 test:
   stage: test
@@ -60,5 +72,17 @@ test:
     - source venv/bin/activate
     - pip install -r requirements.txt
     - pytest tests/ --cov=. --cov-report=term
+  tags:
+    - local
+
+coverage:
+  stage: coverage
+  script:
+    - source venv/bin/activate
+    - pip install -r requirements.txt
+    - pytest tests/ --cov=. --cov-report=html --cov-report=term
+  artifacts:
+    paths:
+      - htmlcov/
   tags:
     - local
