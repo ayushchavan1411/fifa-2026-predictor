@@ -262,7 +262,7 @@ def compare_squads(team1, team2, player_stats_df):
 
 
 # ---------- WIN PROBABILITY (Comprehensive) ----------
-def calculate_win_probability(team1, team2, **kwargs):
+def calculate_win_probability(team1, team2):
     hist_stats = HISTORICAL_STATS
     t1_hist = hist_stats.get(team1, {"win_pct": 0.4, "goals_per_match": 1.0})
     t2_hist = hist_stats.get(team2, {"win_pct": 0.4, "goals_per_match": 1.0})
